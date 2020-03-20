@@ -1,30 +1,65 @@
 #[macro_use]
 extern crate clap;
 extern crate hyper;
-
 use hyper::body::HttpBody;
-use hyper::{Client, Response, Uri};
-use std::io::{Cursor, Write};
+use hyper::{Client, Request, Response, Server, Uri};
+use std::io::Cursor;
 //use tokio::io::{stdout, AsyncWriteExt as _};
-
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type VoidRes = Res<()>;
 
+const QUEUE_NAME: &'static str = "inproc://jpegs";
+
 #[tokio::main]
 async fn main() -> VoidRes {
+    let ctx = zmq::Context::new();
+    let mut rt = tokio::runtime::Runtime::new()?;
     let matches = clap_app!(mjpeg_proxy =>
                             (version: "0.0")
                             (author: "@johnsnewby")
                             (@arg URL: -u --url +required +takes_value "URL to load")
     )
     .get_matches();
-    let uri = matches.value_of("URL").unwrap();
+    let uri: String = String::from(matches.value_of("URL").unwrap());
+    let queuer = rt.spawn(queue_jpegs2(ctx.clone(), uri));
+    println!("pre-ok");
+    get_jpegs(&ctx)?;
+    println!("OK");
+    queuer.await;
+    Ok(())
+}
+
+fn get_jpegs(ctx: &zmq::Context) -> VoidRes {
+    let recv_socket = ctx.socket(zmq::SUB)?;
+    recv_socket.connect(QUEUE_NAME)?;
+    recv_socket.set_subscribe(&[])?;
+    let mut msg = zmq::Message::with_size(200000);
+    println!("1");
+    recv_socket.recv(&mut msg, 200000)?;
+    println!("2");
+    let bytes: &[u8] = msg.get(..).unwrap();
+    validate_jpeg(&msg.to_vec())?;
+    Ok(())
+}
+
+async fn queue_jpegs2(ctx: zmq::Context, uri: String) -> () {
+    match queue_jpegs(&ctx, uri).await {
+        Ok(_) => (),
+        Err(e) => println!("Error: {:?}", e),
+    };
+}
+
+async fn queue_jpegs(ctx: &zmq::Context, uri: String) -> VoidRes {
     let mut resp = connect(&uri).await?;
+    let send_socket = ctx.socket(zmq::PUB)?;
+    send_socket.bind(QUEUE_NAME)?;
     let boundary_separator = get_boundary_separator(&resp)?.unwrap();
     while let Some(bytes) = read_element(&mut resp, &boundary_separator).await? {
         validate_jpeg(&bytes)?;
-        println!("OK");
+        //        println!("Queueing");
+        send_socket.send(&bytes, 0)?;
     }
+    //    println!("OK");
     Ok(())
 }
 
@@ -50,7 +85,7 @@ fn get_boundary_separator(resp: &Response<hyper::Body>) -> Res<Option<String>> {
 }
 
 fn validate_jpeg(bytes: &Vec<u8>) -> VoidRes {
-    println!("{:?}", &bytes[..100]);
+    //    println!("{:?}", &bytes[..100]);
     let decoder = image::jpeg::JpegDecoder::new(Cursor::new(bytes))?;
     Ok(())
 }
@@ -69,7 +104,7 @@ async fn read_element(
         let foo = String::from_utf8_lossy(&bar);
         if let Some(captures) = re.captures(&foo) {
             let preamble = &captures[0];
-            println!("{}", preamble);
+            //            println!("{}", preamble);
             let length: usize = captures[1].to_string().parse()?;
             result.extend(&bar[preamble.len() + 2..]);
             while result.len() < length {

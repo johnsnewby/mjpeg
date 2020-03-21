@@ -12,3 +12,8 @@ apt install libzmq3-dev pkg-config
 ```
 cargo run -- -u http://webcam.local:8080
 ```
+
+## Known Problems
+- May or may not crap out after a while
+- Still fetches a feed in the absence of any clients
+- 8MB binary just for this!

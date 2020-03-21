@@ -2,7 +2,7 @@
 extern crate clap;
 extern crate hyper;
 use hyper::body::HttpBody;
-use hyper::header::{HeaderName, HeaderValue, CONTENT_TYPE};
+use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Request, Response, Server, Uri};
 use once_cell::sync::OnceCell;
@@ -10,13 +10,12 @@ use std::convert::Infallible;
 use std::io::Cursor;
 use std::iter::Iterator;
 use std::sync::{Arc, Mutex};
-//use tokio::io::{stdout, AsyncWriteExt as _};
+
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type VoidRes = Res<()>;
 
 const PORT: u16 = 8888;
 const BIND_ADDRESS: [u8; 4] = [127, 0, 0, 1];
-
 const QUEUE_NAME: &'static str = "inproc://jpegs";
 
 ////////////////////////////////////////////////////////////////
@@ -70,13 +69,13 @@ async fn main() -> VoidRes {
 ////////////////////////////////////////////////////////////////
 // hyper http shit
 
-async fn serve_http(req: Request<Body>) -> Result<Response<Body>, Infallible> {
+async fn serve_http(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
     let sub = Subscription::new().unwrap();
     let iter = sub.map(|ele| package_jpegs(ele));
     let stream = futures_util::stream::iter(iter);
     let body = Body::wrap_stream(stream);
     let mut response = Response::new(body);
-    let mut headers = response.headers_mut();
+    let headers = response.headers_mut();
     headers.insert(
         CONTENT_TYPE,
         "multipart/x-mixed-replace; boundary=BoundaryString"
@@ -110,7 +109,7 @@ impl Subscription {
         socket.connect(QUEUE_NAME)?;
         socket.set_subscribe(&[])?;
         let socket = Arc::new(Mutex::new(socket));
-        let mut msg = zmq::Message::new();
+        let msg = zmq::Message::new();
         Ok(Self { socket, msg })
     }
 }
@@ -130,24 +129,14 @@ impl Iterator for Subscription {
 
 ////////////////////////////////////////////////////////////////
 //
-fn get_jpegs(ctx: &zmq::Context) -> VoidRes {
-    let recv_socket = ctx.socket(zmq::SUB)?;
-    recv_socket.connect(QUEUE_NAME)?;
-    recv_socket.set_subscribe(&[])?;
-    let mut msg = zmq::Message::new();
-    println!("1");
-    recv_socket.recv(&mut msg, 0)?;
-    println!("2");
-    let _bytes: &[u8] = msg.get(..).unwrap();
-    validate_jpeg(&msg.to_vec())?;
-    Ok(())
-}
 
 async fn queue_jpegs2(ctx: zmq::Context, uri: String) -> () {
-    match queue_jpegs(&ctx, uri).await {
-        Ok(_) => (),
-        Err(e) => println!("Error: {:?}", e),
-    };
+    loop {
+        match queue_jpegs(&ctx, uri.clone()).await {
+            Ok(_) => (),
+            Err(e) => println!("Error: {:?}", e),
+        };
+    }
 }
 
 async fn queue_jpegs(ctx: &zmq::Context, uri: String) -> VoidRes {
@@ -212,7 +201,7 @@ async fn read_element(
                 let chunk = &resp.body_mut().data().await.unwrap()?[..];
                 result.extend(chunk);
             }
-            assert_eq!(result.len(), length + 2);
+            //assert_eq!(result.len(), length + 2);
             return Ok(Some(result.to_vec()));
         }
     } else {

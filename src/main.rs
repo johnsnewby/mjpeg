@@ -155,11 +155,11 @@ impl Iterator for Subscription {
     type Item = Res<Vec<u8>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.first_call {
-            debug!("First, sending cached");
-            self.first_call = false;
-            return Some(Ok(get_last_image()));
-        }
+        // if self.first_call {
+        //     debug!("First, sending cached");
+        //     self.first_call = false;
+        //     return Some(Ok(get_last_image()));
+        // }
         if let Ok(socket) = self.socket.lock() {
             socket.recv(&mut self.msg, 0).unwrap();
             debug!(
@@ -193,7 +193,7 @@ async fn queue_jpegs(ctx: &zmq::Context, uri: String) -> VoidRes {
         validate_jpeg(&bytes)?;
         debug!("Queueing");
         send_socket.send(&bytes, 0)?;
-        set_last_image(bytes.to_vec());
+        //set_last_image(bytes.to_vec());
     }
     Ok(())
 }

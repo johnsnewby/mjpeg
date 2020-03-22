@@ -8,14 +8,11 @@ extern crate log;
 #[macro_use]
 extern crate lazy_static;
 use hyper::body::HttpBody;
-use hyper::header::{HeaderName, CACHE_CONTROL, CONTENT_TYPE, EXPIRES, PRAGMA};
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Client, Request, Response, Server, Uri};
+use hyper::{Client, Response, Uri};
 use once_cell::sync::OnceCell;
-use std::convert::Infallible;
 use std::io::Cursor;
 use std::iter::Iterator;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -94,43 +91,28 @@ async fn main() -> VoidRes {
     };
     let addr = std::net::SocketAddr::new(ip_addr, port);
     let queuer = rt.spawn(queue_jpegs2(ctx.clone(), uri));
-    let make_svc = make_service_fn(|_conn: &hyper::server::conn::AddrStream| async {
-        Ok::<_, Infallible>(service_fn(serve_http))
-    });
-    let server = Server::bind(&addr)
-        .tcp_nodelay(true)
-        .http1_max_buf_size(8192)
-        .serve(make_svc);
-    let server_future = rt.spawn(server);
-    server_future.await;
+    let config = tiny_http::ServerConfig::<SocketAddr> { addr, ssl: None };
+    let server = tiny_http::Server::new(config).unwrap();
+    loop {
+        if let Ok(request) = server.recv() {
+            std::thread::spawn(move || handle_request(request));
+        } else {
+            break;
+        }
+    }
     queuer.await?;
     Ok(())
 }
 
-////////////////////////////////////////////////////////////////
-// hyper http shit
-
-async fn serve_http(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
+fn handle_request(request: tiny_http::Request) {
     let sub = Subscription::new().unwrap();
     let iter = sub.map(|ele| package_jpegs(ele));
-    let stream = futures_util::stream::iter(iter);
-    let body = Body::wrap_stream(stream);
-    let mut response = Response::new(body);
-    let headers = response.headers_mut();
-    headers.insert(
-        CONTENT_TYPE,
-        "multipart/x-mixed-replace; boundary=BoundaryString"
-            .parse()
-            .unwrap(),
-    );
-    headers.insert(
-        "MAX_AGE".parse::<HeaderName>().unwrap(),
-        "0".parse().unwrap(),
-    );
-    headers.insert(EXPIRES, "0".parse().unwrap());
-    headers.insert(CACHE_CONTROL, "no-cache, private".parse().unwrap());
-    headers.insert(PRAGMA, "no-cache".parse().unwrap());
-    Ok(response)
+    let mut writer = request.into_writer();
+    let headers = "HTTP/1.0 200 OK\r\nServer: Motion/4.1.1\r\nConnection: close\r\nMax-Age: 0\rnExpires: 0\r\nCache-Control: no-cache, private\r\nPragma: no-cache\r\nContent-Type: multipart/x-mixed-replace; boundary=BoundaryString\r\n\r\n";
+    writer.write(String::from(headers).as_bytes()).unwrap();
+    for ele in iter {
+        writer.write(&ele.unwrap()).unwrap();
+    }
 }
 
 fn package_jpegs(jpeg: Res<Vec<u8>>) -> Res<Vec<u8>> {
@@ -173,11 +155,11 @@ impl Iterator for Subscription {
     type Item = Res<Vec<u8>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // if self.first_call {
-        //     debug!("First, sending cached");
-        //     self.first_call = false;
-        //     return Some(Ok(get_last_image()));
-        // }
+        if self.first_call {
+            debug!("First, sending cached");
+            self.first_call = false;
+            return Some(Ok(get_last_image()));
+        }
         if let Ok(socket) = self.socket.lock() {
             socket.recv(&mut self.msg, 0).unwrap();
             debug!(
@@ -211,7 +193,7 @@ async fn queue_jpegs(ctx: &zmq::Context, uri: String) -> VoidRes {
         validate_jpeg(&bytes)?;
         debug!("Queueing");
         send_socket.send(&bytes, 0)?;
-        //set_last_image(bytes.to_vec());
+        set_last_image(bytes.to_vec());
     }
     Ok(())
 }

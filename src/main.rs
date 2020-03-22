@@ -15,6 +15,7 @@ use once_cell::sync::OnceCell;
 use std::convert::Infallible;
 use std::io::Cursor;
 use std::iter::Iterator;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -72,14 +73,30 @@ async fn main() -> VoidRes {
                             (version: "0.0")
                             (author: "@johnsnewby")
                             (@arg URL: -u --url +required +takes_value "URL to load")
+                            (@arg PORT: -p --port +takes_value "Port for http server to listen on")
+                            (@arg BIND: -b --bind-address +takes_value "Address to bind http server to")
     )
     .get_matches();
     let uri: String = String::from(matches.value_of("URL").unwrap());
+    let ip_addr: std::net::IpAddr = {
+        if let Some(bind_address) = matches.value_of("BIND") {
+            String::from(bind_address).parse().unwrap()
+        } else {
+            BIND_ADDRESS.into()
+        }
+    };
+    let port: u16 = {
+        if let Some(port) = matches.value_of("PORT") {
+            String::from(port).parse().unwrap()
+        } else {
+            PORT
+        }
+    };
+    let addr = std::net::SocketAddr::new(ip_addr, port);
     let queuer = rt.spawn(queue_jpegs2(ctx.clone(), uri));
     let make_svc = make_service_fn(|_conn: &hyper::server::conn::AddrStream| async {
         Ok::<_, Infallible>(service_fn(serve_http))
     });
-    let addr = (BIND_ADDRESS, PORT).into();
     let server = Server::bind(&addr)
         .tcp_nodelay(true)
         .http1_max_buf_size(8192)

@@ -84,7 +84,8 @@ async fn main() -> VoidRes {
         .tcp_nodelay(true)
         .http1_max_buf_size(8192)
         .serve(make_svc);
-    server.await?;
+    let server_future = rt.spawn(server);
+    server_future.await;
     queuer.await?;
     Ok(())
 }

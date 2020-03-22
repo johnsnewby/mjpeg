@@ -1,8 +1,14 @@
+#![feature(decl_macro)]
+#![feature(backtrace)]
 #[macro_use]
 extern crate clap;
 extern crate hyper;
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate lazy_static;
 use hyper::body::HttpBody;
-use hyper::header::CONTENT_TYPE;
+use hyper::header::{HeaderName, CACHE_CONTROL, CONTENT_TYPE, EXPIRES, PRAGMA};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Request, Response, Server, Uri};
 use once_cell::sync::OnceCell;
@@ -40,10 +46,25 @@ fn get_context() -> Res<zmq::Context> {
     }
 }
 
+lazy_static! {
+    static ref LAST_IMAGE: Mutex<Vec<u8>> = Mutex::new(vec!());
+}
+
+fn get_last_image() -> Vec<u8> {
+    LAST_IMAGE.lock().unwrap().clone()
+}
+
+fn set_last_image(new: Vec<u8>) {
+    let mut last_image = LAST_IMAGE.lock().unwrap();
+    last_image.clear();
+    last_image.extend_from_slice(&new);
+}
+
 ////////////////////////////////////////////////////////////////
 // main
 #[tokio::main]
 async fn main() -> VoidRes {
+    env_logger::init();
     let ctx = zmq::Context::new();
     set_context(ctx.clone())?;
     let rt = tokio::runtime::Runtime::new()?;
@@ -55,12 +76,14 @@ async fn main() -> VoidRes {
     .get_matches();
     let uri: String = String::from(matches.value_of("URL").unwrap());
     let queuer = rt.spawn(queue_jpegs2(ctx.clone(), uri));
-
     let make_svc = make_service_fn(|_conn: &hyper::server::conn::AddrStream| async {
         Ok::<_, Infallible>(service_fn(serve_http))
     });
     let addr = (BIND_ADDRESS, PORT).into();
-    let server = Server::bind(&addr).serve(make_svc);
+    let server = Server::bind(&addr)
+        .tcp_nodelay(true)
+        .http1_max_buf_size(8192)
+        .serve(make_svc);
     server.await?;
     queuer.await?;
     Ok(())
@@ -82,6 +105,13 @@ async fn serve_http(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
             .parse()
             .unwrap(),
     );
+    headers.insert(
+        "MAX_AGE".parse::<HeaderName>().unwrap(),
+        "0".parse().unwrap(),
+    );
+    headers.insert(EXPIRES, "0".parse().unwrap());
+    headers.insert(CACHE_CONTROL, "no-cache, private".parse().unwrap());
+    headers.insert(PRAGMA, "no-cache".parse().unwrap());
     Ok(response)
 }
 
@@ -94,12 +124,15 @@ fn package_jpegs(jpeg: Res<Vec<u8>>) -> Res<Vec<u8>> {
     )
     .into_bytes();
     preamble.extend_from_slice(&ele);
+    preamble.extend_from_slice("\r\n".as_bytes());
+    debug!("Returning JPEG packaged for http stream");
     Ok(preamble)
 }
 
 struct Subscription {
     socket: Arc<Mutex<zmq::Socket>>,
     msg: zmq::Message,
+    first_call: bool,
 }
 
 impl Subscription {
@@ -110,7 +143,11 @@ impl Subscription {
         socket.set_subscribe(&[])?;
         let socket = Arc::new(Mutex::new(socket));
         let msg = zmq::Message::new();
-        Ok(Self { socket, msg })
+        Ok(Self {
+            socket,
+            msg,
+            first_call: true,
+        })
     }
 }
 
@@ -118,8 +155,17 @@ impl Iterator for Subscription {
     type Item = Res<Vec<u8>>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.first_call {
+            debug!("First, sending cached");
+            self.first_call = false;
+            return Some(Ok(get_last_image()));
+        }
         if let Ok(socket) = self.socket.lock() {
             socket.recv(&mut self.msg, 0).unwrap();
+            debug!(
+                "Received {} bytes from queue",
+                self.msg.get(..).unwrap().len()
+            );
             Some(Ok(self.msg.get(..).unwrap().to_vec()))
         } else {
             None
@@ -128,13 +174,12 @@ impl Iterator for Subscription {
 }
 
 ////////////////////////////////////////////////////////////////
-//
-
+// wrapper b/c error catching.
 async fn queue_jpegs2(ctx: zmq::Context, uri: String) -> () {
     loop {
         match queue_jpegs(&ctx, uri.clone()).await {
             Ok(_) => (),
-            Err(e) => println!("Error: {:?}", e),
+            Err(e) => error!("Error: {:?}\nBacktrace:\n{:?}", e, e.backtrace()),
         };
     }
 }
@@ -146,10 +191,10 @@ async fn queue_jpegs(ctx: &zmq::Context, uri: String) -> VoidRes {
     let boundary_separator = get_boundary_separator(&resp)?.unwrap();
     while let Some(bytes) = read_element(&mut resp, &boundary_separator).await? {
         validate_jpeg(&bytes)?;
-        //        println!("Queueing");
+        debug!("Queueing");
         send_socket.send(&bytes, 0)?;
+        set_last_image(bytes.to_vec());
     }
-    //    println!("OK");
     Ok(())
 }
 
@@ -175,7 +220,6 @@ fn get_boundary_separator(resp: &Response<hyper::Body>) -> Res<Option<String>> {
 }
 
 fn validate_jpeg(bytes: &Vec<u8>) -> VoidRes {
-    //    println!("{:?}", &bytes[..100]);
     let _decoder = image::jpeg::JpegDecoder::new(Cursor::new(bytes))?;
     Ok(())
 }
@@ -194,14 +238,15 @@ async fn read_element(
         let foo = String::from_utf8_lossy(&bar);
         if let Some(captures) = re.captures(&foo) {
             let preamble = &captures[0];
-            //            println!("{}", preamble);
             let length: usize = captures[1].to_string().parse()?;
             result.extend(&bar[preamble.len() + 2..]);
             while result.len() < length {
                 let chunk = &resp.body_mut().data().await.unwrap()?[..];
                 result.extend(chunk);
             }
-            //assert_eq!(result.len(), length + 2);
+            if result.len() != length + 2 {
+                warn!("Expected length {} got {}", result.len(), length + 2);
+            }
             return Ok(Some(result.to_vec()));
         }
     } else {

@@ -104,15 +104,16 @@ async fn main() -> VoidRes {
     Ok(())
 }
 
-fn handle_request(request: tiny_http::Request) {
-    let sub = Subscription::new().unwrap();
+fn handle_request(request: tiny_http::Request) -> VoidRes {
+    let sub = Subscription::new()?;
     let iter = sub.map(|ele| package_jpegs(ele));
     let mut writer = request.into_writer();
     let headers = "HTTP/1.0 200 OK\r\nServer: Motion/4.1.1\r\nConnection: close\r\nMax-Age: 0\r\nExpires: 0\r\nCache-Control: no-cache, private\r\nPragma: no-cache\r\nContent-Type: multipart/x-mixed-replace; boundary=BoundaryString\r\n\r\n";
-    writer.write(String::from(headers).as_bytes()).unwrap();
+    writer.write(String::from(headers).as_bytes())?;
     for ele in iter {
-        writer.write(&ele.unwrap()).unwrap();
+        writer.write(&ele?)?;
     }
+    Ok(())
 }
 
 fn package_jpegs(jpeg: Res<Vec<u8>>) -> Res<Vec<u8>> {

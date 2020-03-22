@@ -108,7 +108,7 @@ fn handle_request(request: tiny_http::Request) {
     let sub = Subscription::new().unwrap();
     let iter = sub.map(|ele| package_jpegs(ele));
     let mut writer = request.into_writer();
-    let headers = "HTTP/1.0 200 OK\r\nServer: Motion/4.1.1\r\nConnection: close\r\nMax-Age: 0\rnExpires: 0\r\nCache-Control: no-cache, private\r\nPragma: no-cache\r\nContent-Type: multipart/x-mixed-replace; boundary=BoundaryString\r\n\r\n";
+    let headers = "HTTP/1.0 200 OK\r\nServer: Motion/4.1.1\r\nConnection: close\r\nMax-Age: 0\r\nExpires: 0\r\nCache-Control: no-cache, private\r\nPragma: no-cache\r\nContent-Type: multipart/x-mixed-replace; boundary=BoundaryString\r\n\r\n";
     writer.write(String::from(headers).as_bytes()).unwrap();
     for ele in iter {
         writer.write(&ele.unwrap()).unwrap();

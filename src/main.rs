@@ -9,6 +9,7 @@ extern crate log;
 extern crate lazy_static;
 use hyper::body::HttpBody;
 use hyper::{Client, Response, Uri};
+use image::ImageEncoder;
 use once_cell::sync::OnceCell;
 use std::io::Cursor;
 use std::iter::Iterator;
@@ -72,6 +73,7 @@ async fn main() -> VoidRes {
                             (@arg URL: -u --url +required +takes_value "URL to load")
                             (@arg PORT: -p --port +takes_value "Port for http server to listen on")
                             (@arg BIND: -b --bind-address +takes_value "Address to bind http server to")
+                            (@arg CROP: -c --crop +takes_value "Crop, in form x,y,width,height (px)")
     )
     .get_matches();
     let uri: String = String::from(matches.value_of("URL").unwrap());
@@ -89,8 +91,19 @@ async fn main() -> VoidRes {
             PORT
         }
     };
+    let mut crop_param: Option<(u32, u32, u32, u32)> = None;
+    if let Some(crop) = matches.value_of("CROP") {
+        let d: Vec<u32> = String::from(crop)
+            .split(",")
+            .map(|x| x.parse::<u32>().unwrap())
+            .collect();
+        if d.len() != 4 {
+            panic!("Dimensions in form x,y,w,h");
+        }
+        crop_param = Some((d[0], d[1], d[2], d[3]));
+    }
     let addr = std::net::SocketAddr::new(ip_addr, port);
-    let queuer = rt.spawn(queue_jpegs2(ctx.clone(), uri));
+    let queuer = rt.spawn(queue_jpegs2(ctx.clone(), uri, crop_param));
     let config = tiny_http::ServerConfig::<SocketAddr> { addr, ssl: None };
     let server = tiny_http::Server::new(config).unwrap();
     loop {
@@ -176,22 +189,26 @@ impl Iterator for Subscription {
 
 ////////////////////////////////////////////////////////////////
 // wrapper b/c error catching.
-async fn queue_jpegs2(ctx: zmq::Context, uri: String) -> () {
+async fn queue_jpegs2(ctx: zmq::Context, uri: String, crop: Option<(u32, u32, u32, u32)>) -> () {
     loop {
-        match queue_jpegs(&ctx, uri.clone()).await {
+        match queue_jpegs(&ctx, uri.clone(), crop).await {
             Ok(_) => (),
             Err(e) => error!("Error: {:?}\nBacktrace:\n{:?}", e, e.backtrace()),
         };
     }
 }
 
-async fn queue_jpegs(ctx: &zmq::Context, uri: String) -> VoidRes {
+async fn queue_jpegs(
+    ctx: &zmq::Context,
+    uri: String,
+    crop: Option<(u32, u32, u32, u32)>,
+) -> VoidRes {
     let mut resp = connect(&uri).await?;
     let send_socket = ctx.socket(zmq::PUB)?;
     send_socket.bind(QUEUE_NAME)?;
     let boundary_separator = get_boundary_separator(&resp)?.unwrap();
-    while let Some(bytes) = read_element(&mut resp, &boundary_separator).await? {
-        validate_jpeg(&bytes)?;
+    while let Some(mut bytes) = read_element(&mut resp, &boundary_separator).await? {
+        bytes = validate_and_crop_jpeg(bytes, crop)?;
         debug!("Queueing");
         send_socket.send(&bytes, 0)?;
         set_last_image(bytes.to_vec());
@@ -220,9 +237,18 @@ fn get_boundary_separator(resp: &Response<hyper::Body>) -> Res<Option<String>> {
     Ok(None)
 }
 
-fn validate_jpeg(bytes: &Vec<u8>) -> VoidRes {
-    let _decoder = image::jpeg::JpegDecoder::new(Cursor::new(bytes))?;
-    Ok(())
+fn validate_and_crop_jpeg(bytes: Vec<u8>, crop: Option<(u32, u32, u32, u32)>) -> Res<Vec<u8>> {
+    let mut bytes = bytes;
+    let mut image = image::load_from_memory(&bytes)?; // sanity check
+    if let Some(c) = crop {
+        image = image.crop(c.0, c.1, c.2, c.3);
+        let new_image = vec![];
+        let mut cursor = Cursor::new(new_image);
+        let encoder = image::jpeg::JPEGEncoder::new(&mut cursor);
+        encoder.write_image(&image.to_bytes(), c.2, c.3, image.color())?;
+        bytes = cursor.into_inner();
+    }
+    Ok(bytes)
 }
 
 async fn read_element(

@@ -14,6 +14,7 @@ use once_cell::sync::OnceCell;
 use std::io::Cursor;
 use std::iter::Iterator;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -57,6 +58,10 @@ fn set_last_image(new: Vec<u8>) {
     let mut last_image = LAST_IMAGE.lock().unwrap();
     last_image.clear();
     last_image.extend_from_slice(&new);
+}
+
+lazy_static! {
+    static ref CLIENT_COUNT: AtomicU32 = AtomicU32::new(0u32);
 }
 
 ////////////////////////////////////////////////////////////////
@@ -106,15 +111,23 @@ async fn main() -> VoidRes {
     let queuer = rt.spawn(queue_jpegs2(ctx.clone(), uri, crop_param));
     let config = tiny_http::ServerConfig::<SocketAddr> { addr, ssl: None };
     let server = tiny_http::Server::new(config).unwrap();
+
     loop {
         if let Ok(request) = server.recv() {
-            std::thread::spawn(move || handle_request(request));
+            std::thread::spawn(move || handle_request_outer(request));
         } else {
             break;
         }
     }
     queuer.await?;
     Ok(())
+}
+
+fn handle_request_outer(request: tiny_http::Request) {
+    match handle_request(request) {
+        Ok(_) => (),
+        Err(e) => warn!("Error handling request: {:?}", e),
+    }
 }
 
 fn handle_request(request: tiny_http::Request) -> VoidRes {
@@ -126,6 +139,7 @@ fn handle_request(request: tiny_http::Request) -> VoidRes {
     for ele in iter {
         writer.write(&ele?)?;
     }
+    debug!("Iterator ended, ending http stream");
     Ok(())
 }
 
@@ -182,6 +196,7 @@ impl Iterator for Subscription {
             );
             Some(Ok(self.msg.get(..).unwrap().to_vec()))
         } else {
+            warn!("Failed to acquire lock");
             None
         }
     }

@@ -222,7 +222,8 @@ async fn queue_jpegs(
     let send_socket = ctx.socket(zmq::PUB)?;
     send_socket.bind(QUEUE_NAME)?;
     let boundary_separator = get_boundary_separator(&resp)?.unwrap();
-    while let Some(mut bytes) = read_element(&mut resp, &boundary_separator).await? {
+    let mut buffer: Vec<u8> = vec![];
+    while let Some(mut bytes) = read_element(&mut resp, &boundary_separator, &mut buffer).await? {
         bytes = validate_and_crop_jpeg(bytes, crop)?;
         debug!("Queueing");
         send_socket.send(&bytes, 0)?;
@@ -278,31 +279,38 @@ fn validate_and_crop_jpeg(bytes: Vec<u8>, crop: Option<(u32, u32, u32, u32)>) ->
 async fn read_element(
     resp: &mut Response<hyper::Body>,
     boundary_separator: &String,
+    buffer: &mut Vec<u8>,
 ) -> Res<Option<Vec<u8>>> {
+    debug!(
+        "read_element: buffer is {}",
+        String::from_utf8_lossy(buffer)
+    );
     let re = regex::Regex::new(&format!(
-        "--{}\r\nContent-type: image/jpeg\\s+Content-Length:\\s+(\\d+)\r\n",
+        "--{}\r\nContent-type: image/jpeg\\s+Content-Length:\\s+(\\d+)\r\n\r\n",
         boundary_separator
     ))?;
     let mut result: Vec<u8> = vec![];
-    let mut leftover: Vec<u8> = vec![];
     if let Some(chunk) = resp.body_mut().data().await {
-        let bar = chunk?;
-        let foo = String::from_utf8_lossy(&bar);
+        buffer.extend_from_slice(&chunk?);
+        let foo = String::from_utf8_lossy(&buffer);
         if let Some(captures) = re.captures(&foo) {
             let preamble = &captures[0];
             let mut length: usize = captures[1].to_string().parse()?;
             length += 2; // CRLF
             debug!("Preamble: {}", preamble);
             debug!("Length: {}", length);
-            result.extend(&bar[preamble.len() + 2..]);
+            let preamble_length = preamble.len();
+            result.extend(&buffer[preamble_length..]);
+            debug!("{:?}", result);
             while result.len() < length {
                 let chunk = &resp.body_mut().data().await.unwrap()?[..];
                 result.extend(chunk);
             }
+            buffer.clear();
             if result.len() > length {
-                leftover = result[length..].to_vec();
-                result = result[..length - 1].to_vec();
-                warn!("Expected length {} got {}", result.len(), length + 2);
+                buffer.extend(result[length..].to_vec());
+                result.truncate(length);
+                debug!("Leftover input, passing {:?} to next invocation", buffer);
             }
             return Ok(Some(result.to_vec()));
         } else {

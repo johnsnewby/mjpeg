@@ -235,7 +235,7 @@ async fn read_element(
     ))?;
     let mut result: Vec<u8> = vec![];
     if let Some(chunk) = resp.body_mut().data().await {
-        let bar = chunk.unwrap();
+        let bar = chunk?;
         let foo = String::from_utf8_lossy(&bar);
         if let Some(captures) = re.captures(&foo) {
             let preamble = &captures[0];

@@ -284,12 +284,14 @@ async fn read_element(
         boundary_separator
     ))?;
     let mut result: Vec<u8> = vec![];
+    let mut leftover: Vec<u8> = vec![];
     if let Some(chunk) = resp.body_mut().data().await {
         let bar = chunk?;
         let foo = String::from_utf8_lossy(&bar);
         if let Some(captures) = re.captures(&foo) {
             let preamble = &captures[0];
-            let length: usize = captures[1].to_string().parse()?;
+            let mut length: usize = captures[1].to_string().parse()?;
+            length += 2; // CRLF
             debug!("Preamble: {}", preamble);
             debug!("Length: {}", length);
             result.extend(&bar[preamble.len() + 2..]);
@@ -297,7 +299,9 @@ async fn read_element(
                 let chunk = &resp.body_mut().data().await.unwrap()?[..];
                 result.extend(chunk);
             }
-            if result.len() != length + 2 {
+            if result.len() > length {
+                leftover = result[length..].to_vec();
+                result = result[..length - 1].to_vec();
                 warn!("Expected length {} got {}", result.len(), length + 2);
             }
             return Ok(Some(result.to_vec()));

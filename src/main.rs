@@ -281,6 +281,8 @@ async fn read_element(
         if let Some(captures) = re.captures(&foo) {
             let preamble = &captures[0];
             let length: usize = captures[1].to_string().parse()?;
+            debug!("Preamble: {}", preamble);
+	    debug!("Length: {}", length);
             result.extend(&bar[preamble.len() + 2..]);
             while result.len() < length {
                 let chunk = &resp.body_mut().data().await.unwrap()?[..];

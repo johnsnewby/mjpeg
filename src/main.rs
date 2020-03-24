@@ -252,17 +252,26 @@ fn get_boundary_separator(resp: &Response<hyper::Body>) -> Res<Option<String>> {
     Ok(None)
 }
 
+use image::ImageDecoder;
 fn validate_and_crop_jpeg(bytes: Vec<u8>, crop: Option<(u32, u32, u32, u32)>) -> Res<Vec<u8>> {
     let mut bytes = bytes;
-    let mut image = image::load_from_memory(&bytes)?; // sanity check
+    let mut decoder = image::jpeg::JpegDecoder::new(Cursor::new(bytes.clone()))?;
+    debug!(
+        "Dimensions: {} {}",
+        decoder.dimensions().0,
+        decoder.dimensions().1,
+    );
+    /*
     if let Some(c) = crop {
-        image = image.crop(c.0, c.1, c.2, c.3);
+        let image = image::ImageBuffer::from_pixel(decoder.dimensions().0, decoder.dimensions().1, decoder.)
+            image.crop(c.0, c.1, c.2, c.3);
         let new_image = vec![];
         let mut cursor = Cursor::new(new_image);
         let encoder = image::jpeg::JPEGEncoder::new(&mut cursor);
         encoder.write_image(&image.to_bytes(), c.2, c.3, image.color())?;
         bytes = cursor.into_inner();
     }
+     */
     Ok(bytes)
 }
 
@@ -282,7 +291,7 @@ async fn read_element(
             let preamble = &captures[0];
             let length: usize = captures[1].to_string().parse()?;
             debug!("Preamble: {}", preamble);
-	    debug!("Length: {}", length);
+            debug!("Length: {}", length);
             result.extend(&bar[preamble.len() + 2..]);
             while result.len() < length {
                 let chunk = &resp.body_mut().data().await.unwrap()?[..];
@@ -292,6 +301,8 @@ async fn read_element(
                 warn!("Expected length {} got {}", result.len(), length + 2);
             }
             return Ok(Some(result.to_vec()));
+        } else {
+            warn!("Failed to match, input was {}", foo);
         }
     } else {
         return Ok(None);

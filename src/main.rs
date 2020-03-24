@@ -78,7 +78,7 @@ async fn main() -> VoidRes {
                             (@arg URL: -u --url +required +takes_value "URL to load")
                             (@arg PORT: -p --port +takes_value "Port for http server to listen on")
                             (@arg BIND: -b --bind-address +takes_value "Address to bind http server to")
-                            (@arg CROP: -c --crop +takes_value "Crop, in form x,y,width,height (px)")
+                            //(@arg CROP: -c --crop +takes_value "Crop, in form x,y,width,height (px)")
     )
     .get_matches();
     let uri: String = String::from(matches.value_of("URL").unwrap());
@@ -205,8 +205,11 @@ impl Iterator for Subscription {
 ////////////////////////////////////////////////////////////////
 // wrapper b/c error catching.
 async fn queue_jpegs2(ctx: zmq::Context, uri: String, crop: Option<(u32, u32, u32, u32)>) -> () {
+    let send_socket = ctx.socket(zmq::PUB).unwrap();
+    send_socket.bind(QUEUE_NAME).unwrap();
+    let ss_mut = Arc::new(Mutex::new(send_socket));
     loop {
-        match queue_jpegs(&ctx, uri.clone(), crop).await {
+        match queue_jpegs(&ctx, uri.clone(), &ss_mut).await {
             Ok(_) => (),
             Err(e) => error!("Error: {:?}\nBacktrace:\n{:?}", e, e.backtrace()),
         };
@@ -216,17 +219,15 @@ async fn queue_jpegs2(ctx: zmq::Context, uri: String, crop: Option<(u32, u32, u3
 async fn queue_jpegs(
     ctx: &zmq::Context,
     uri: String,
-    crop: Option<(u32, u32, u32, u32)>,
+    send_socket: &Arc<Mutex<zmq::Socket>>,
 ) -> VoidRes {
     let mut resp = connect(&uri).await?;
-    let send_socket = ctx.socket(zmq::PUB)?;
-    send_socket.bind(QUEUE_NAME)?;
     let boundary_separator = get_boundary_separator(&resp)?.unwrap();
     let mut buffer: Vec<u8> = vec![];
     while let Some(mut bytes) = read_element(&mut resp, &boundary_separator, &mut buffer).await? {
-        bytes = validate_and_crop_jpeg(bytes, crop)?;
+        bytes = validate_and_crop_jpeg(bytes, None)?;
         debug!("Queueing");
-        send_socket.send(&bytes, 0)?;
+        send_socket.lock().unwrap().send(&bytes, 0)?;
         set_last_image(bytes.to_vec());
     }
     Ok(())

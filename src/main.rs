@@ -74,22 +74,11 @@ fn client_connected() {
 }
 
 fn client_disconnected() {
-    let (lock, cvar) = &*(*CLIENT_COUNT);
+    let (lock, _cvar) = &*(*CLIENT_COUNT);
     if let Ok(mut client_count) = lock.lock() {
         *client_count -= 1;
     } else {
         error!("Could not lock CLIENT_COUNT");
-    }
-}
-
-fn get_client_count() -> Res<u32> {
-    let (lock, cvar) = &*(*CLIENT_COUNT);
-    if let Ok(mut client_count) = lock.lock() {
-        Ok(*client_count)
-    } else {
-        Err(Box::new(simple_error::SimpleError::new(
-            "Could not lock CLIENT_COUNT",
-        )))
     }
 }
 
@@ -233,7 +222,7 @@ async fn queue_jpegs2(ctx: zmq::Context, uri: String) -> () {
         };
         {
             let (lock, cvar) = &*(*CLIENT_COUNT);
-            let mut client_count = lock.lock().unwrap();
+            let client_count = lock.lock().unwrap();
             debug!("Waiting for condition variable");
             match cvar.wait_timeout(client_count, std::time::Duration::from_secs(30)) {
                 Ok((_, result)) => {
@@ -261,7 +250,7 @@ async fn queue_jpegs(
         debug!("Queueing");
         send_socket.lock().unwrap().send(&bytes, 0)?;
         set_last_image(bytes.to_vec());
-        let (lock, cvar) = &*pair;
+        let (lock, _) = &*pair;
         match lock.lock() {
             Ok(x) => {
                 debug!("Client count is {}", x);

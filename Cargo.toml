@@ -9,6 +9,7 @@ edition = "2018"
 [dependencies]
 clap = "^2"
 env_logger = "0.7.1"
+finally-block = "0.2.0"
 futures = { version = "0.3.4", features = ["thread-pool"] }
 futures-util = "^0.3.4"
 hyper = { version = "^0.13", features = ["stream"] }

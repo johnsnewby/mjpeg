@@ -213,6 +213,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9435d864e017c3c6afeac1654189b06cdb491cf2ff73dbf0d73b0f292f42ff8"
 
 [[package]]
+name = "finally-block"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "086f2744f22eb18fb866d3c68f28b096315d5d9cb562dd3418c38eec986621c9"
+
+[[package]]
 name = "fnv"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -652,10 +658,11 @@ dependencies = [
 
 [[package]]
 name = "mjpeg-proxy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "env_logger",
+ "finally-block",
  "futures",
  "futures-util",
  "hyper",

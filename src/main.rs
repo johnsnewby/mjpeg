@@ -9,13 +9,11 @@ extern crate log;
 extern crate lazy_static;
 use hyper::body::HttpBody;
 use hyper::{Client, Response, Uri};
-use image::ImageEncoder;
 use once_cell::sync::OnceCell;
 use std::io::Cursor;
 use std::iter::Iterator;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU32;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type VoidRes = Res<()>;
@@ -61,10 +59,35 @@ fn set_last_image(new: Vec<u8>) {
 }
 
 lazy_static! {
-    static ref CLIENT_COUNT: AtomicU32 = AtomicU32::new(0u32);
+    static ref CLIENT_COUNT: Mutex<u32> = Mutex::new(0u32);
 }
 
-////////////////////////////////////////////////////////////////
+fn client_connected() {
+    if let Ok(mut client_count) = CLIENT_COUNT.lock() {
+        *client_count += 1;
+    } else {
+        error!("Could not lock CLIENT_COUNT");
+    }
+}
+
+fn client_disconnected() {
+    if let Ok(mut client_count) = CLIENT_COUNT.lock() {
+        *client_count -= 1;
+    } else {
+        error!("Could not lock CLIENT_COUNT");
+    }
+}
+
+fn get_client_count() -> Res<u32> {
+    if let Ok(client_count) = CLIENT_COUNT.lock() {
+        Ok(*client_count)
+    } else {
+        Err(Box::new(simple_error::SimpleError::new(
+            "Could not lock CLIENT_COUNT",
+        )))
+    }
+}
+
 // main
 #[tokio::main]
 async fn main() -> VoidRes {
@@ -78,7 +101,6 @@ async fn main() -> VoidRes {
                             (@arg URL: -u --url +required +takes_value "URL to load")
                             (@arg PORT: -p --port +takes_value "Port for http server to listen on")
                             (@arg BIND: -b --bind-address +takes_value "Address to bind http server to")
-                            //(@arg CROP: -c --crop +takes_value "Crop, in form x,y,width,height (px)")
     )
     .get_matches();
     let uri: String = String::from(matches.value_of("URL").unwrap());
@@ -96,19 +118,8 @@ async fn main() -> VoidRes {
             PORT
         }
     };
-    let mut crop_param: Option<(u32, u32, u32, u32)> = None;
-    if let Some(crop) = matches.value_of("CROP") {
-        let d: Vec<u32> = String::from(crop)
-            .split(",")
-            .map(|x| x.parse::<u32>().unwrap())
-            .collect();
-        if d.len() != 4 {
-            panic!("Dimensions in form x,y,w,h");
-        }
-        crop_param = Some((d[0], d[1], d[2], d[3]));
-    }
     let addr = std::net::SocketAddr::new(ip_addr, port);
-    let queuer = rt.spawn(queue_jpegs2(ctx.clone(), uri, crop_param));
+    let queuer = rt.spawn(queue_jpegs2(ctx.clone(), uri));
     let config = tiny_http::ServerConfig::<SocketAddr> { addr, ssl: None };
     let server = tiny_http::Server::new(config).unwrap();
 
@@ -124,6 +135,8 @@ async fn main() -> VoidRes {
 }
 
 fn handle_request_outer(request: tiny_http::Request) {
+    client_connected();
+    let _f = finally_block::finally(|| client_disconnected());
     match handle_request(request) {
         Ok(_) => (),
         Err(e) => warn!("Error handling request: {:?}", e),
@@ -204,7 +217,7 @@ impl Iterator for Subscription {
 
 ////////////////////////////////////////////////////////////////
 // wrapper b/c error catching.
-async fn queue_jpegs2(ctx: zmq::Context, uri: String, crop: Option<(u32, u32, u32, u32)>) -> () {
+async fn queue_jpegs2(ctx: zmq::Context, uri: String) -> () {
     let send_socket = ctx.socket(zmq::PUB).unwrap();
     send_socket.bind(QUEUE_NAME).unwrap();
     let ss_mut = Arc::new(Mutex::new(send_socket));
@@ -217,7 +230,7 @@ async fn queue_jpegs2(ctx: zmq::Context, uri: String, crop: Option<(u32, u32, u3
 }
 
 async fn queue_jpegs(
-    ctx: &zmq::Context,
+    _ctx: &zmq::Context,
     uri: String,
     send_socket: &Arc<Mutex<zmq::Socket>>,
 ) -> VoidRes {
@@ -255,25 +268,13 @@ fn get_boundary_separator(resp: &Response<hyper::Body>) -> Res<Option<String>> {
 }
 
 use image::ImageDecoder;
-fn validate_and_crop_jpeg(bytes: Vec<u8>, crop: Option<(u32, u32, u32, u32)>) -> Res<Vec<u8>> {
-    let mut bytes = bytes;
-    let mut decoder = image::jpeg::JpegDecoder::new(Cursor::new(bytes.clone()))?;
+fn validate_jpeg(bytes: Vec<u8>) -> Res<Vec<u8>> {
+    let decoder = image::jpeg::JpegDecoder::new(Cursor::new(bytes.clone()))?;
     debug!(
         "Dimensions: {} {}",
         decoder.dimensions().0,
         decoder.dimensions().1,
     );
-    /*
-    if let Some(c) = crop {
-        let image = image::ImageBuffer::from_pixel(decoder.dimensions().0, decoder.dimensions().1, decoder.)
-            image.crop(c.0, c.1, c.2, c.3);
-        let new_image = vec![];
-        let mut cursor = Cursor::new(new_image);
-        let encoder = image::jpeg::JPEGEncoder::new(&mut cursor);
-        encoder.write_image(&image.to_bytes(), c.2, c.3, image.color())?;
-        bytes = cursor.into_inner();
-    }
-     */
     Ok(bytes)
 }
 

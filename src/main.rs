@@ -1,5 +1,5 @@
-#![feature(decl_macro)]
 #![feature(backtrace)]
+#![feature(decl_macro)]
 #[macro_use]
 extern crate clap;
 extern crate hyper;
@@ -223,7 +223,13 @@ async fn queue_jpegs2(ctx: zmq::Context, uri: String) -> () {
         {
             let (lock, cvar) = &*(*CLIENT_COUNT);
             let client_count = lock.lock().unwrap();
-            debug!("Waiting for condition variable");
+            if *client_count != 0 {
+                continue;
+            }
+            debug!(
+                "Client count is {}, waiting for condition variable",
+                *client_count
+            );
             match cvar.wait_timeout(client_count, std::time::Duration::from_secs(30)) {
                 Ok((_, result)) => {
                     if !result.timed_out() {

@@ -59,19 +59,23 @@ fn set_last_image(new: Vec<u8>) {
 }
 
 lazy_static! {
-    static ref CLIENT_COUNT: Mutex<u32> = Mutex::new(0u32);
+    static ref CLIENT_COUNT: Arc<(Mutex<u32>, Condvar)> =
+        Arc::new((Mutex::new(0u32), Condvar::new()));
 }
 
 fn client_connected() {
-    if let Ok(mut client_count) = CLIENT_COUNT.lock() {
+    let (lock, cvar) = &*(*CLIENT_COUNT);
+    if let Ok(mut client_count) = lock.lock() {
         *client_count += 1;
+        cvar.notify_all();
     } else {
         error!("Could not lock CLIENT_COUNT");
     }
 }
 
 fn client_disconnected() {
-    if let Ok(mut client_count) = CLIENT_COUNT.lock() {
+    let (lock, cvar) = &*(*CLIENT_COUNT);
+    if let Ok(mut client_count) = lock.lock() {
         *client_count -= 1;
     } else {
         error!("Could not lock CLIENT_COUNT");
@@ -79,7 +83,8 @@ fn client_disconnected() {
 }
 
 fn get_client_count() -> Res<u32> {
-    if let Ok(client_count) = CLIENT_COUNT.lock() {
+    let (lock, cvar) = &*(*CLIENT_COUNT);
+    if let Ok(mut client_count) = lock.lock() {
         Ok(*client_count)
     } else {
         Err(Box::new(simple_error::SimpleError::new(
@@ -226,6 +231,19 @@ async fn queue_jpegs2(ctx: zmq::Context, uri: String) -> () {
             Ok(_) => (),
             Err(e) => error!("Error: {:?}\nBacktrace:\n{:?}", e, e.backtrace()),
         };
+        {
+            let (lock, cvar) = &*(*CLIENT_COUNT);
+            let mut client_count = lock.lock().unwrap();
+            debug!("Waiting for condition variable");
+            match cvar.wait_timeout(client_count, std::time::Duration::from_secs(30)) {
+                Ok((_, result)) => {
+                    if !result.timed_out() {
+                        debug!("Notify!");
+                    }
+                }
+                Err(e) => error!("Error waiting for clients {}", e.to_string()),
+            }
+        }
     }
 }
 
@@ -234,14 +252,32 @@ async fn queue_jpegs(
     uri: String,
     send_socket: &Arc<Mutex<zmq::Socket>>,
 ) -> VoidRes {
+    let pair = (*CLIENT_COUNT).clone();
     let mut resp = connect(&uri).await?;
     let boundary_separator = get_boundary_separator(&resp)?.unwrap();
     let mut buffer: Vec<u8> = vec![];
     while let Some(mut bytes) = read_element(&mut resp, &boundary_separator, &mut buffer).await? {
-        bytes = validate_and_crop_jpeg(bytes, None)?;
+        bytes = validate_jpeg(bytes)?;
         debug!("Queueing");
         send_socket.lock().unwrap().send(&bytes, 0)?;
         set_last_image(bytes.to_vec());
+        let (lock, cvar) = &*pair;
+        match lock.lock() {
+            Ok(x) => {
+                debug!("Client count is {}", x);
+                if *x == 0 {
+                    debug!("No clients, returning");
+                    // quit if no clients.
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                return Err(Box::new(simple_error::SimpleError::new(format!(
+                    "Error accessing condition variable: {}",
+                    e.to_string()
+                ))))
+            }
+        }
     }
     Ok(())
 }
@@ -270,7 +306,7 @@ fn get_boundary_separator(resp: &Response<hyper::Body>) -> Res<Option<String>> {
 use image::ImageDecoder;
 fn validate_jpeg(bytes: Vec<u8>) -> Res<Vec<u8>> {
     let decoder = image::jpeg::JpegDecoder::new(Cursor::new(bytes.clone()))?;
-    debug!(
+    trace!(
         "Dimensions: {} {}",
         decoder.dimensions().0,
         decoder.dimensions().1,
@@ -283,7 +319,7 @@ async fn read_element(
     boundary_separator: &String,
     buffer: &mut Vec<u8>,
 ) -> Res<Option<Vec<u8>>> {
-    debug!(
+    trace!(
         "read_element: buffer is {}",
         String::from_utf8_lossy(buffer)
     );
@@ -299,11 +335,11 @@ async fn read_element(
             let preamble = &captures[0];
             let mut length: usize = captures[1].to_string().parse()?;
             length += 2; // CRLF
-            debug!("Preamble: {}", preamble);
-            debug!("Length: {}", length);
+            trace!("Preamble: {}", preamble);
+            trace!("Length: {}", length);
             let preamble_length = preamble.len();
             result.extend(&buffer[preamble_length..]);
-            debug!("{:?}", result);
+            trace!("{:?}", result);
             while result.len() < length {
                 let chunk = &resp.body_mut().data().await.unwrap()?[..];
                 result.extend(chunk);
@@ -312,7 +348,7 @@ async fn read_element(
             if result.len() > length {
                 buffer.extend(result[length..].to_vec());
                 result.truncate(length);
-                debug!("Leftover input, passing {:?} to next invocation", buffer);
+                trace!("Leftover input, passing {:?} to next invocation", buffer);
             }
             return Ok(Some(result.to_vec()));
         } else {

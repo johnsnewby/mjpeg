@@ -226,10 +226,7 @@ async fn queue_jpegs2(ctx: zmq::Context, uri: String) -> () {
             if *client_count != 0 {
                 continue;
             }
-            debug!(
-                "Client count is {}, waiting for condition variable",
-                *client_count
-            );
+            debug!("Client count is {}, waiting for client", *client_count);
             match cvar.wait_timeout(client_count, std::time::Duration::from_secs(30)) {
                 Ok((_, result)) => {
                     if !result.timed_out() {

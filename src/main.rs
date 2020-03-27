@@ -1,5 +1,5 @@
-#![feature(backtrace)]
 #![feature(decl_macro)]
+#![feature(backtrace)]
 #[macro_use]
 extern crate clap;
 extern crate hyper;
@@ -20,7 +20,7 @@ type VoidRes = Res<()>;
 
 const PORT: u16 = 8888;
 const BIND_ADDRESS: [u8; 4] = [127, 0, 0, 1];
-const QUEUE_NAME: &'static str = "inproc://jpegs";
+const QUEUE_NAME: &str = "inproc://jpegs";
 
 ////////////////////////////////////////////////////////////////
 // icky global shit
@@ -117,12 +117,8 @@ async fn main() -> VoidRes {
     let config = tiny_http::ServerConfig::<SocketAddr> { addr, ssl: None };
     let server = tiny_http::Server::new(config).unwrap();
 
-    loop {
-        if let Ok(request) = server.recv() {
-            std::thread::spawn(move || handle_request_outer(request));
-        } else {
-            break;
-        }
+    while let Ok(request) = server.recv() {
+        std::thread::spawn(move || handle_request_outer(request));
     }
     queuer.await?;
     Ok(())
@@ -130,7 +126,7 @@ async fn main() -> VoidRes {
 
 fn handle_request_outer(request: tiny_http::Request) {
     client_connected();
-    let _f = finally_block::finally(|| client_disconnected());
+    let _f = finally_block::finally(client_disconnected);
     match handle_request(request) {
         Ok(_) => (),
         Err(e) => warn!("Error handling request: {:?}", e),
@@ -139,12 +135,12 @@ fn handle_request_outer(request: tiny_http::Request) {
 
 fn handle_request(request: tiny_http::Request) -> VoidRes {
     let sub = Subscription::new()?;
-    let iter = sub.map(|ele| package_jpegs(ele));
+    let iter = sub.map(package_jpegs);
     let mut writer = request.into_writer();
     let headers = "HTTP/1.0 200 OK\r\nServer: Motion/4.1.1\r\nConnection: close\r\nMax-Age: 0\r\nExpires: 0\r\nCache-Control: no-cache, private\r\nPragma: no-cache\r\nContent-Type: multipart/x-mixed-replace; boundary=BoundaryString\r\n\r\n";
-    writer.write(String::from(headers).as_bytes())?;
+    writer.write_all(String::from(headers).as_bytes())?;
     for ele in iter {
-        writer.write(&ele?)?;
+        writer.write_all(&ele?)?;
     }
     debug!("Iterator ended, ending http stream");
     Ok(())
@@ -159,7 +155,7 @@ fn package_jpegs(jpeg: Res<Vec<u8>>) -> Res<Vec<u8>> {
     )
     .into_bytes();
     preamble.extend_from_slice(&ele);
-    preamble.extend_from_slice("\r\n".as_bytes());
+    preamble.extend_from_slice(b"\r\n");
     debug!("Returning JPEG packaged for http stream");
     Ok(preamble)
 }
@@ -211,7 +207,7 @@ impl Iterator for Subscription {
 
 ////////////////////////////////////////////////////////////////
 // wrapper b/c error catching.
-async fn queue_jpegs2(ctx: zmq::Context, uri: String) -> () {
+async fn queue_jpegs2(ctx: zmq::Context, uri: String) {
     let send_socket = ctx.socket(zmq::PUB).unwrap();
     send_socket.bind(QUEUE_NAME).unwrap();
     let ss_mut = Arc::new(Mutex::new(send_socket));
@@ -226,7 +222,10 @@ async fn queue_jpegs2(ctx: zmq::Context, uri: String) -> () {
             if *client_count != 0 {
                 continue;
             }
-            debug!("Client count is {}, waiting for client", *client_count);
+            debug!(
+                "Client count is {}, waiting for condition variable",
+                *client_count
+            );
             match cvar.wait_timeout(client_count, std::time::Duration::from_secs(30)) {
                 Ok((_, result)) => {
                     if !result.timed_out() {
@@ -287,7 +286,7 @@ fn get_boundary_separator(resp: &Response<hyper::Body>) -> Res<Option<String>> {
         return Ok(None);
     }
     let content_type = headers["Content-Type"].clone();
-    for val in content_type.to_str()?.to_string().split(";") {
+    for val in content_type.to_str()?.to_string().split(';') {
         if let Some(captures) = re.captures(val) {
             return Ok(Some(captures[1].to_string()));
         }
@@ -308,7 +307,7 @@ fn validate_jpeg(bytes: Vec<u8>) -> Res<Vec<u8>> {
 
 async fn read_element(
     resp: &mut Response<hyper::Body>,
-    boundary_separator: &String,
+    boundary_separator: &str,
     buffer: &mut Vec<u8>,
 ) -> Res<Option<Vec<u8>>> {
     trace!(
@@ -322,8 +321,8 @@ async fn read_element(
     let mut result: Vec<u8> = vec![];
     if let Some(chunk) = resp.body_mut().data().await {
         buffer.extend_from_slice(&chunk?);
-        let foo = String::from_utf8_lossy(&buffer);
-        if let Some(captures) = re.captures(&foo) {
+        let as_str = String::from_utf8_lossy(&buffer);
+        if let Some(captures) = re.captures(&as_str) {
             let preamble = &captures[0];
             let mut length: usize = captures[1].to_string().parse()?;
             length += 2; // CRLF
@@ -344,7 +343,7 @@ async fn read_element(
             }
             return Ok(Some(result.to_vec()));
         } else {
-            warn!("Failed to match, input was {}", foo);
+            warn!("Failed to match, input was {}", as_str);
         }
     } else {
         return Ok(None);

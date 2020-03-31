@@ -9,7 +9,7 @@ It was written in order that the [PigeonCam](http://tauben.newby.org) does not u
 - If there are no clients, only requests one JPEG every 30 seconds
 - Caches the last JPEG for better user experience
 - Maintains connections with its clients even if the back-end goes away briefly
-- If you use the ?width=XX parameter, it will resize for you. For multiple clients at the same size, the calculation is only done once.
+- If you use the `?width=XX` parameter, it will resize for you. For multiple clients at the same size, the calculation is only done once.
 
 
 ## Requirements

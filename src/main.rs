@@ -9,12 +9,13 @@ extern crate log;
 extern crate lazy_static;
 use hyper::body::HttpBody;
 use hyper::{Client, Response, Uri};
-use once_cell::sync::OnceCell;
 use std::borrow::Cow;
 use std::io::Cursor;
 use std::iter::Iterator;
 use std::net::SocketAddr;
 use std::sync::{Arc, Condvar, Mutex};
+
+mod scaler;
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type VoidRes = Res<()>;
@@ -25,24 +26,12 @@ const QUEUE_NAME: &str = "inproc://jpegs";
 
 ////////////////////////////////////////////////////////////////
 // icky global shit
-static CONTEXT: OnceCell<zmq::Context> = OnceCell::new();
-
-fn set_context(ctx: zmq::Context) -> VoidRes {
-    match CONTEXT.set(ctx) {
-        Ok(_) => Ok(()),
-        Err(_) => Err(Box::new(simple_error::SimpleError::new(
-            "Error initializing context",
-        ))),
-    }
+lazy_static! {
+    static ref CONTEXT: zmq::Context = zmq::Context::new();
 }
 
 fn get_context() -> Res<zmq::Context> {
-    match CONTEXT.get() {
-        Some(x) => Ok(x.clone()),
-        None => Err(Box::new(simple_error::SimpleError::new(
-            "Couldn't get context",
-        ))),
-    }
+    Ok(CONTEXT.clone())
 }
 
 lazy_static! {
@@ -87,8 +76,7 @@ fn client_disconnected() {
 #[tokio::main]
 async fn main() -> VoidRes {
     env_logger::init();
-    let ctx = zmq::Context::new();
-    set_context(ctx.clone())?;
+    let ctx = get_context()?;
     let rt = tokio::runtime::Runtime::new()?;
     let matches = clap_app!(mjpeg_proxy =>
                             (version: "0.0")
@@ -140,8 +128,16 @@ fn handle_request_outer(request: tiny_http::Request) {
 }
 
 fn handle_request(request: tiny_http::Request, width: Option<u16>) -> VoidRes {
-    let sub = Subscription::new()?;
-    let iter = sub.map(move |x| package_jpegs(x, width));
+    let sub = match width {
+        None => Subscription::new()?,
+        Some(w) => Subscription::new_with_socket(scaler::get_scaler(w)?)?,
+    };
+    let _f = finally_block::finally(|| match scaler::return_scaler(width) {
+        Ok(_) => (),
+        Err(e) => error!("Error returning scaler: {}", e.to_string()),
+    });
+
+    let iter = sub.map(package_jpegs);
     let mut writer = request.into_writer();
     let headers = "HTTP/1.0 200 OK\r\nServer: Motion/4.1.1\r\nConnection: close\r\nMax-Age: 0\r\nExpires: 0\r\nCache-Control: no-cache, private\r\nPragma: no-cache\r\nContent-Type: multipart/x-mixed-replace; boundary=BoundaryString\r\n\r\n";
     writer.write_all(String::from(headers).as_bytes())?;
@@ -152,32 +148,8 @@ fn handle_request(request: tiny_http::Request, width: Option<u16>) -> VoidRes {
     Ok(())
 }
 
-fn package_jpegs(jpeg: Res<Vec<u8>>, width: Option<u16>) -> Res<Vec<u8>> {
-    let mut ele = jpeg.unwrap();
-    if let Some(new_width) = width {
-        let decoder = image::jpeg::JpegDecoder::new(Cursor::new(ele.clone()))?;
-        let dimensions = decoder.dimensions();
-        let scale: f32 = new_width as f32 / dimensions.0 as f32;
-        let new_height: u16 = (dimensions.1 as f32 * scale) as u16;
-        if scale != 1.0 {
-            debug!("Resizing to width {}", new_width);
-            let image = image::DynamicImage::from_decoder(decoder)?.resize_exact(
-                new_width.into(),
-                new_height as u32,
-                image::imageops::FilterType::Nearest,
-            );
-            ele.clear();
-            let mut cursor = Cursor::new(ele.clone());
-            let mut encoder = image::jpeg::JPEGEncoder::new(&mut cursor);
-            encoder.encode(
-                &image.to_bytes(),
-                new_width.into(),
-                new_height.into(),
-                image.color(),
-            )?;
-            ele.extend_from_slice(&cursor.into_inner());
-        }
-    }
+fn package_jpegs(jpeg: Res<Vec<u8>>) -> Res<Vec<u8>> {
+    let ele = jpeg.unwrap();
     let len = ele.len();
     let mut preamble: Vec<u8> = format!(
         "--BoundaryString\r\nContent-type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
@@ -190,10 +162,20 @@ fn package_jpegs(jpeg: Res<Vec<u8>>, width: Option<u16>) -> Res<Vec<u8>> {
     Ok(preamble)
 }
 
-struct Subscription {
+pub struct Subscription {
     socket: Arc<Mutex<zmq::Socket>>,
     msg: zmq::Message,
     first_call: bool,
+}
+
+impl Clone for Subscription {
+    fn clone(&self) -> Self {
+        Self {
+            socket: self.socket.clone(),
+            msg: zmq::Message::new(),
+            first_call: self.first_call,
+        }
+    }
 }
 
 impl Subscription {
@@ -208,6 +190,14 @@ impl Subscription {
             socket,
             msg,
             first_call: true,
+        })
+    }
+
+    pub fn new_with_socket(socket: Arc<Mutex<zmq::Socket>>) -> Res<Self> {
+        Ok(Self {
+            socket,
+            msg: zmq::Message::new(),
+            first_call: false,
         })
     }
 }

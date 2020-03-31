@@ -2,7 +2,7 @@
 
 This proxy exists in order that I can share the my raspberry pi camera, streaming using [mjpeg over http](https://en.wikipedia.org/wiki/Motion_JPEG#M-JPEG_over_HTTP), to more clients from a machine on the internet. It works with [motion](https://motion-project.github.io/), and maybe with other sources, who knows?
 
-It was written in order that the (PigeonCam)[http://tauben.newby.org] does not use too much of my precious bandwidth.
+It was written in order that the [PigeonCam](http://tauben.newby.org) does not use too much of my precious bandwidth.
 
 ## Features
 

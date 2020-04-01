@@ -104,26 +104,49 @@ impl ScaledSource {
 
     pub fn run(
         pair: Arc<(Mutex<u32>, Condvar)>,
-        mut source: crate::Subscription,
+        source: crate::Subscription,
         destination: Arc<Mutex<zmq::Socket>>,
         width: u16,
     ) {
+        match Self::inner_run(pair, source, destination, width) {
+            Ok(_) => (),
+            Err(e) => error!("Error: {}", e.to_string()),
+        }
+    }
+
+    pub fn inner_run(
+        pair: Arc<(Mutex<u32>, Condvar)>,
+        source: crate::Subscription,
+        destination: Arc<Mutex<zmq::Socket>>,
+        width: u16,
+    ) -> VoidRes {
+        let mut my_source = source;
         loop {
             {
                 let (lock, cvar) = &*pair;
-                let client_count = lock.lock().unwrap();
+                let client_count = match lock.lock() {
+                    Ok(x) => x,
+                    Err(e) => {
+                        return Err(Box::new(simple_error::SimpleError::new(format!(
+                            "Couldn't lock mutest: {}",
+                            e.to_string()
+                        ))))
+                    }
+                };
                 debug!("width: {}, client_count: {}", width, client_count);
                 if *client_count == 0 {
+                    drop(my_source);
                     debug!("Client count 0, waiting for notify");
                     match cvar.wait(client_count) {
                         Ok(_) => debug!("Woken up by client count > 0"),
                         Err(e) => error!("Error from wait: {}", e.to_string()),
                     }
+                    my_source = crate::Subscription::new()?;
                 }
             } // clients turned up!
-            if let Some(Ok(img)) = source.next() {
-                let new_image = Self::resize_image(img, width).unwrap();
-                destination.lock().unwrap().send(&new_image, 0).unwrap();
+            if let Some(Ok(img)) = my_source.next() {
+                let new_image = Self::resize_image(img, width)?;
+                destination.lock().unwrap().send(&new_image, 0)?;
             } else {
                 warn!("Couldn't get image!");
             }
@@ -139,7 +162,7 @@ impl ScaledSource {
         let image = image::DynamicImage::from_decoder(decoder)?.resize_exact(
             width.into(),
             new_height as u32,
-            image::imageops::FilterType::Nearest,
+            image::imageops::FilterType::Triangle,
         );
         let mut cursor = Cursor::new(ele.clone());
         let mut encoder = image::jpeg::JPEGEncoder::new(&mut cursor);

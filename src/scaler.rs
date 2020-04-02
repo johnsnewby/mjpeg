@@ -128,7 +128,7 @@ impl ScaledSource {
                     Ok(x) => x,
                     Err(e) => {
                         return Err(Box::new(simple_error::SimpleError::new(format!(
-                            "Couldn't lock mutest: {}",
+                            "Couldn't lock mutex: {}",
                             e.to_string()
                         ))))
                     }
@@ -146,7 +146,15 @@ impl ScaledSource {
             } // clients turned up!
             if let Some(Ok(img)) = my_source.next() {
                 let new_image = Self::resize_image(img, width)?;
-                destination.lock().unwrap().send(&new_image, 0)?;
+                match destination.lock() {
+                    Ok(x) => x.send(&new_image, 0)?,
+                    Err(e) => {
+                        return Err(Box::new(simple_error::SimpleError::new(format!(
+                            "Couldn't lock mutex: {}",
+                            e.to_string()
+                        ))))
+                    }
+                }
             } else {
                 warn!("Couldn't get image!");
             }
@@ -162,7 +170,7 @@ impl ScaledSource {
         let image = image::DynamicImage::from_decoder(decoder)?.resize_exact(
             width.into(),
             new_height as u32,
-            image::imageops::FilterType::Triangle,
+            image::imageops::FilterType::Nearest,
         );
         let mut cursor = Cursor::new(ele.clone());
         let mut encoder = image::jpeg::JPEGEncoder::new(&mut cursor);

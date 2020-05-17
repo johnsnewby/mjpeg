@@ -23,6 +23,7 @@ type VoidRes = Res<()>;
 const PORT: u16 = 8888;
 const BIND_ADDRESS: [u8; 4] = [127, 0, 0, 1];
 const QUEUE_NAME: &str = "inproc://jpegs";
+const TIMEOUT: i32 = 1800;
 
 ////////////////////////////////////////////////////////////////
 // icky global shit
@@ -84,6 +85,7 @@ async fn main() -> VoidRes {
                             (@arg URL: -u --url +required +takes_value "URL to load")
                             (@arg PORT: -p --port +takes_value "Port for http server to listen on")
                             (@arg BIND: -b --bind-address +takes_value "Address to bind http server to")
+                            (@arg TIMEOUT: -t --timeout +takes_value "Timeout for receiving")
     )
     .get_matches();
     let uri: String = String::from(matches.value_of("URL").unwrap());
@@ -101,6 +103,14 @@ async fn main() -> VoidRes {
             PORT
         }
     };
+    let _timeout: i32 = {
+        if let Some(timeout) = matches.value_of("TIMEOUT") {
+            String::from(timeout).parse().unwrap()
+        } else {
+            TIMEOUT
+        }
+    };
+    debug!("Binding to port {}", port);
     let addr = std::net::SocketAddr::new(ip_addr, port);
     let queuer = rt.spawn(queue_jpegs2(ctx.clone(), uri));
     let config = tiny_http::ServerConfig::<SocketAddr> { addr, ssl: None };
@@ -158,7 +168,6 @@ fn package_jpegs(jpeg: Res<Vec<u8>>) -> Res<Vec<u8>> {
     .into_bytes();
     preamble.extend_from_slice(&ele);
     preamble.extend_from_slice(b"\r\n");
-    debug!("Returning JPEG packaged for http stream");
     Ok(preamble)
 }
 
@@ -182,6 +191,7 @@ impl Subscription {
     pub fn new() -> Res<Self> {
         let ctx = get_context()?;
         let socket = ctx.socket(zmq::SUB)?;
+        socket.set_rcvtimeo(TIMEOUT)?; // TODO: use param
         socket.connect(QUEUE_NAME)?;
         socket.set_subscribe(&[])?;
         let socket = Arc::new(Mutex::new(socket));
@@ -212,12 +222,22 @@ impl Iterator for Subscription {
             return Some(Ok(get_last_image()));
         }
         if let Ok(socket) = self.socket.lock() {
-            socket.recv(&mut self.msg, 0).unwrap();
-            debug!(
-                "Received {} bytes from queue",
-                self.msg.get(..).unwrap().len()
-            );
-            Some(Ok(self.msg.get(..).unwrap().to_vec()))
+            match socket.recv(&mut self.msg, 0) {
+                Ok(_) => {
+                    debug!(
+                        "Received {} bytes from queue",
+                        self.msg.get(..).unwrap().len()
+                    );
+                    return Some(Ok(self.msg.get(..).unwrap().to_vec()));
+                }
+                Err(e) => {
+                    debug!(
+                        "Timeout exceeded error is {}, sending cached",
+                        e.to_string()
+                    );
+                    return Some(Ok(get_last_image()));
+                }
+            }
         } else {
             warn!("Failed to acquire lock");
             None
